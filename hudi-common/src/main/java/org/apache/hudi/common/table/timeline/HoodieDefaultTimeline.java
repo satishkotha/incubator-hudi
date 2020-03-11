@@ -118,6 +118,21 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   }
 
   @Override
+  public HoodieTimeline filterInstantsBeforePendingCompaction() {
+    Option<HoodieInstant> pendingCompactionInstant = filterPendingCompactionTimeline().firstInstant();
+    if (pendingCompactionInstant.isPresent()) {
+      HoodieTimeline commitsTimeline = findInstantsBefore(pendingCompactionInstant.get().getTimestamp());
+      int numCommitsFilteredByCompaction = commitsTimeline.countInstants() - countInstants();
+      LOG.info("Compaction is pending " + pendingCompactionInstant.get().getTimestamp()
+              + " skipping " + numCommitsFilteredByCompaction + " commits");
+
+      return commitsTimeline;
+    } else {
+      return this;
+    }
+  }
+
+  @Override
   public HoodieTimeline filterPendingCompactionTimeline() {
     return new HoodieDefaultTimeline(
         instants.stream().filter(s -> s.getAction().equals(HoodieTimeline.COMPACTION_ACTION)), details);
@@ -137,6 +152,13 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   }
 
   @Override
+  public HoodieTimeline findInstantsBefore(String commitTime) {
+    return new HoodieDefaultTimeline(instants.stream()
+            .filter(s -> HoodieTimeline.compareTimestamps(s.getTimestamp(), commitTime, LESSER)),
+            details);
+  }
+
+  @Override
   public HoodieTimeline filter(Predicate<HoodieInstant> filter) {
     return new HoodieDefaultTimeline(instants.stream().filter(filter), details);
   }
@@ -144,6 +166,7 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   /**
    * Get all instants (commits, delta commits) that produce new data, in the active timeline.
    */
+  @Override
   public HoodieTimeline getCommitsTimeline() {
     return getTimelineOfActions(Sets.newHashSet(COMMIT_ACTION, DELTA_COMMIT_ACTION));
   }
@@ -178,8 +201,15 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
    * @param actions actions allowed in the timeline
    */
   public HoodieTimeline getTimelineOfActions(Set<String> actions) {
-    return new HoodieDefaultTimeline(getInstants().filter(s -> actions.contains(s.getAction())),
+    return new HoodieDefaultTimeline(getInstantsOfActions(actions),
             (Function<HoodieInstant, Option<byte[]>> & Serializable) this::getInstantDetails);
+  }
+
+  /**
+   * Get instants that match specified set of actions.
+   */
+  public Stream<HoodieInstant> getInstantsOfActions(Set<String> actions) {
+    return getInstants().filter(s -> actions.contains(s.getAction()));
   }
 
   /**

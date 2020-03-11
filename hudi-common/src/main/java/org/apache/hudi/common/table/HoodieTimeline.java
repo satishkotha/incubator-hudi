@@ -127,6 +127,24 @@ public interface HoodieTimeline extends Serializable {
    */
   HoodieTimeline getCommitsAndCompactionTimeline();
 
+
+  /**
+   * Get all instants (commits, delta commits) that produce new data, in the active timeline.
+   */
+  HoodieTimeline getCommitsTimeline();
+
+  /**
+   * Timeline to include all instants before the first 'requested compaction'.
+   *
+   * For example, say timeline: commit at t0, deltacommit at t1, compaction requested at t2, deltacommit at t3,
+   * this method would return t0, t1
+   *
+   * If there is no pending compaction this is equivalent to getting all instants in the timeline.
+   *
+   * @return
+   */
+  HoodieTimeline filterInstantsBeforePendingCompaction();
+
   /**
    * Filter this timeline to just include requested and inflight compaction instants.
    * 
@@ -143,6 +161,11 @@ public interface HoodieTimeline extends Serializable {
    * Create a new Timeline with all the instants after startTs.
    */
   HoodieTimeline findInstantsAfter(String commitTime, int numCommits);
+
+  /**
+   * Create a new Timeline with all instants before specified time.
+   */
+  HoodieTimeline findInstantsBefore(String time);
 
   /**
    * Custom Filter of Instants.

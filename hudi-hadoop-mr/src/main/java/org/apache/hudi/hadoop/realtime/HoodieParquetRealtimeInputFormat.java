@@ -159,6 +159,12 @@ public class HoodieParquetRealtimeInputFormat extends HoodieParquetInputFormat i
     return super.listStatus(job);
   }
 
+  @Override
+  protected HoodieTimeline filterInstantsTimeline(HoodieTimeline timeline) {
+    // no specific filtering for Realtime format
+    return timeline;
+  }
+
   /**
    * Add a field to the existing fields projected.
    */

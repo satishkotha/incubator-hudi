@@ -18,6 +18,8 @@
 
 package org.apache.hudi.common.table.string;
 
+import com.google.common.collect.Sets;
+import org.apache.hadoop.fs.Path;
 import org.apache.hudi.common.HoodieCommonTestHarness;
 import org.apache.hudi.common.model.HoodieTestUtils;
 import org.apache.hudi.common.model.TimelineLayoutVersion;
@@ -27,14 +29,11 @@ import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieInstant.State;
 import org.apache.hudi.common.util.Option;
-
-import org.apache.hadoop.fs.Path;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
-import com.google.common.collect.Sets;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -160,6 +159,8 @@ public class TestHoodieActiveTimeline extends HoodieCommonTestHarness {
         .filterCompletedInstants().findInstantsInRange("04", "11").getInstants().map(HoodieInstant::getTimestamp));
     HoodieTestUtils.assertStreamEquals("", Stream.of("09", "11"), timeline.getCommitTimeline().filterCompletedInstants()
         .findInstantsAfter("07", 2).getInstants().map(HoodieInstant::getTimestamp));
+    HoodieTestUtils.assertStreamEquals("", Stream.of("01", "03", "05"), timeline.getCommitTimeline().filterCompletedInstants()
+            .findInstantsBefore("07").getInstants().map(HoodieInstant::getTimestamp));
     assertFalse(timeline.empty());
     assertFalse(timeline.getCommitTimeline().filterPendingExcludingCompaction().empty());
     assertEquals("", 12, timeline.countInstants());
@@ -398,6 +399,51 @@ public class TestHoodieActiveTimeline extends HoodieCommonTestHarness {
         .forEach(i -> assertTrue(t2.containsInstant(i)));
     sup.get().filter(i -> !i.getAction().equals(HoodieTimeline.COMPACTION_ACTION))
         .forEach(i -> assertFalse(t2.containsInstant(i)));
+  }
+
+  @Test
+  public void testPendingCompactionWithActiveCommits() {
+    // setup 4 sample instants in timeline
+    List<HoodieInstant> instants = new ArrayList<>();
+    HoodieInstant t1 = new HoodieInstant(State.COMPLETED, HoodieTimeline.COMMIT_ACTION, "1");
+    HoodieInstant t2 = new HoodieInstant(State.INFLIGHT, HoodieTimeline.DELTA_COMMIT_ACTION, "2");
+    HoodieInstant t3 = new HoodieInstant(State.REQUESTED, HoodieTimeline.COMPACTION_ACTION, "3");
+    HoodieInstant t4 = new HoodieInstant(State.COMPLETED, HoodieTimeline.DELTA_COMMIT_ACTION, "4");
+    HoodieInstant t5 = new HoodieInstant(State.REQUESTED, HoodieTimeline.COMPACTION_ACTION, "5");
+    HoodieInstant t6 = new HoodieInstant(State.COMPLETED, HoodieTimeline.DELTA_COMMIT_ACTION, "6");
+
+    instants.add(t1);
+    instants.add(t2);
+    instants.add(t3);
+    instants.add(t4);
+    instants.add(t5);
+    instants.add(t6);
+    timeline = new HoodieActiveTimeline(metaClient);
+    timeline.setInstants(instants);
+
+    // Verify getCommitsTimelineBeforePendingCompaction does not return instants after first compaction instant
+    HoodieTimeline filteredTimeline = timeline.filterInstantsBeforePendingCompaction();
+    assertTrue(filteredTimeline.containsInstant(t1));
+    assertTrue(filteredTimeline.containsInstant(t2));
+    assertFalse(filteredTimeline.containsInstant(t3));
+    assertFalse(filteredTimeline.containsInstant(t4));
+    assertFalse(filteredTimeline.containsInstant(t5));
+    assertFalse(filteredTimeline.containsInstant(t6));
+
+
+    // remove compaction instant and setup timeline again
+    instants.remove(t3);
+    timeline = new HoodieActiveTimeline(metaClient);
+    timeline.setInstants(instants);
+    filteredTimeline = timeline.filterInstantsBeforePendingCompaction();
+
+    // verify all remaining instants are returned.
+    assertTrue(filteredTimeline.containsInstant(t1));
+    assertTrue(filteredTimeline.containsInstant(t2));
+    assertFalse(filteredTimeline.containsInstant(t3));
+    assertTrue(filteredTimeline.containsInstant(t4));
+    assertFalse(filteredTimeline.containsInstant(t5));
+    assertFalse(filteredTimeline.containsInstant(t6));
   }
 
   /**
