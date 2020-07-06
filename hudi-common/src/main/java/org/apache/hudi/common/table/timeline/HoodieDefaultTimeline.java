@@ -109,8 +109,16 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
 
   @Override
   public HoodieDefaultTimeline getCommitsAndCompactionTimeline() {
-    Set<String> validActions = CollectionUtils.createSet(COMMIT_ACTION, DELTA_COMMIT_ACTION, COMPACTION_ACTION);
+    Set<String> validActions = CollectionUtils.createSet(COMMIT_ACTION, DELTA_COMMIT_ACTION, COMPACTION_ACTION, REPLACE_ACTION);
     return new HoodieDefaultTimeline(instants.stream().filter(s -> validActions.contains(s.getAction())), details);
+  }
+
+  @Override
+  public HoodieTimeline getCompletedAndReplaceTimeline() {
+    Set<String> commitActions = CollectionUtils.createSet(COMMIT_ACTION, DELTA_COMMIT_ACTION);
+    Set<String> validCommitTimes = instants.stream().filter(s -> commitActions.contains(s.getAction())).map(s -> s.getTimestamp()).collect(Collectors.toSet());
+    return new HoodieDefaultTimeline(instants.stream().filter(s -> s.getAction().equals(REPLACE_ACTION))
+        .filter(instant -> validCommitTimes.contains(instant.getTimestamp())), details);
   }
 
   @Override
@@ -148,7 +156,7 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
    * Get all instants (commits, delta commits) that produce new data, in the active timeline.
    */
   public HoodieTimeline getCommitsTimeline() {
-    return getTimelineOfActions(CollectionUtils.createSet(COMMIT_ACTION, DELTA_COMMIT_ACTION));
+    return getTimelineOfActions(CollectionUtils.createSet(COMMIT_ACTION, DELTA_COMMIT_ACTION, REPLACE_ACTION));
   }
 
   /**

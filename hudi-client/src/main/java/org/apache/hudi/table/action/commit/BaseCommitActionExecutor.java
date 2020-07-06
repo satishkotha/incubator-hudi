@@ -38,7 +38,6 @@ import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.WorkloadProfile;
 import org.apache.hudi.table.WorkloadStat;
 import org.apache.hudi.table.action.BaseActionExecutor;
-
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
@@ -46,16 +45,17 @@ import org.apache.spark.Partitioner;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.storage.StorageLevel;
+import scala.Tuple2;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-
-import scala.Tuple2;
 
 public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>>
     extends BaseActionExecutor<HoodieWriteMetadata> {
@@ -143,7 +143,7 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>>
     }
   }
 
-  private Partitioner getPartitioner(WorkloadProfile profile) {
+  protected Partitioner getPartitioner(WorkloadProfile profile) {
     if (WriteOperationType.isChangingRecords(operationType)) {
       return getUpsertPartitioner(profile);
     } else {
@@ -244,6 +244,8 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>>
         return handleInsert(binfo.fileIdPrefix, recordItr);
       } else if (btype.equals(BucketType.UPDATE)) {
         return handleUpdate(binfo.partitionPath, binfo.fileIdPrefix, recordItr);
+      } else if (btype.equals(BucketType.REPLACE)) {
+        return handleReplace(binfo.partitionPath, binfo.fileIdPrefix);
       } else {
         throw new HoodieUpsertException("Unknown bucketType " + btype + " for partition :" + partition);
       }
@@ -274,4 +276,19 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>>
 
   protected abstract Iterator<List<WriteStatus>> handleUpdate(String partitionPath, String fileId,
       Iterator<HoodieRecord<T>> recordItr) throws IOException;
+
+  protected Iterator<List<WriteStatus>> handleReplace(String partitionPath, String fileId) {
+    // mark file as 'deleted' in metadata. the actual file will be removed later by cleaner to provide snapshot isolation
+    WriteStatus status = new WriteStatus(false, 0.0, true);
+    status.setFileId(fileId);
+    status.setTotalErrorRecords(0);
+    status.setPartitionPath(partitionPath);
+    status.setStat(new HoodieWriteStat());
+    status.getStat().setPartitionPath(partitionPath);
+    status.getStat().setFileId(fileId);
+    status.getStat().setNumDeletes(Integer.MAX_VALUE);//token to indicate all rows are deleted
+    List<WriteStatus> result = new ArrayList<>();
+    result.add(status);
+    return Collections.singletonList(result).iterator();
+  }
 }

@@ -54,15 +54,21 @@ public class WriteStatus implements Serializable {
 
   private long totalRecords = 0;
   private long totalErrorRecords = 0;
+  private final boolean isReplaced;
 
   private final double failureFraction;
   private final boolean trackSuccessRecords;
   private final transient Random random;
 
   public WriteStatus(Boolean trackSuccessRecords, Double failureFraction) {
+    this(trackSuccessRecords, failureFraction, false);
+  }
+
+  public WriteStatus(Boolean trackSuccessRecords, Double failureFraction, boolean isReplaced) {
     this.trackSuccessRecords = trackSuccessRecords;
     this.failureFraction = failureFraction;
     this.random = new Random(RANDOM_SEED);
+    this.isReplaced = isReplaced;
   }
 
   /**
@@ -138,6 +144,10 @@ public class WriteStatus implements Serializable {
 
   public HoodieWriteStat getStat() {
     return stat;
+  }
+
+  public boolean isReplaced() {
+    return isReplaced;
   }
 
   public void setStat(HoodieWriteStat stat) {

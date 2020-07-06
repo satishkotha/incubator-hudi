@@ -37,6 +37,8 @@ public enum WriteOperationType {
   BULK_INSERT_PREPPED("bulk_insert_prepped"),
   // delete
   DELETE("delete"),
+  // insert overwrite
+  INSERT_OVERWRITE("insert_overwrite"),
   // used for old version
   UNKNOWN("unknown");
 

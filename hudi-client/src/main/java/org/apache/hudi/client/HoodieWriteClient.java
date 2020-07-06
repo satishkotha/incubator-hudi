@@ -18,6 +18,7 @@
 
 package org.apache.hudi.client;
 
+import com.codahale.metrics.Timer;
 import org.apache.hudi.avro.model.HoodieCleanMetadata;
 import org.apache.hudi.avro.model.HoodieCompactionPlan;
 import org.apache.hudi.avro.model.HoodieRestoreMetadata;
@@ -51,8 +52,6 @@ import org.apache.hudi.table.UserDefinedBulkInsertPartitioner;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.compact.CompactHelpers;
 import org.apache.hudi.table.action.savepoint.SavepointHelpers;
-
-import com.codahale.metrics.Timer;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.apache.spark.SparkConf;
@@ -287,6 +286,22 @@ public class HoodieWriteClient<T extends HoodieRecordPayload> extends AbstractHo
     setOperationType(WriteOperationType.BULK_INSERT_PREPPED);
     this.asyncCleanerService = AsyncCleanerService.startAsyncCleaningIfEnabled(this, instantTime);
     HoodieWriteMetadata result = table.bulkInsertPrepped(jsc,instantTime, preppedRecords, bulkInsertPartitioner);
+    return postWrite(result, instantTime, table);
+  }
+
+  /**
+   * Removes all existing records from the partitions affected and inserts the given HoodieRecords, into the table.
+
+   * @param records HoodieRecords to insert
+   * @param instantTime Instant time of the commit
+   * @return JavaRDD[WriteStatus] - RDD of WriteStatus to inspect errors and counts
+   */
+  public JavaRDD<WriteStatus> insertOverwrite(JavaRDD<HoodieRecord<T>> records, final String instantTime) {
+    HoodieTable<T> table = getTableAndInitCtx(WriteOperationType.INSERT_OVERWRITE);
+    table.validateInsertSchema();
+    setOperationType(WriteOperationType.INSERT_OVERWRITE);
+    this.asyncCleanerService = AsyncCleanerService.startAsyncCleaningIfEnabled(this, instantTime);
+    HoodieWriteMetadata result = table.insertOverwrite(jsc, instantTime, records);
     return postWrite(result, instantTime, table);
   }
 

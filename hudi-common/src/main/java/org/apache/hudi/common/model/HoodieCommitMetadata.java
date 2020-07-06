@@ -96,7 +96,7 @@ public class HoodieCommitMetadata implements Serializable {
   public void setCompacted(Boolean compacted) {
     this.compacted = compacted;
   }
-
+  
   public HashMap<String, String> getFileIdAndRelativePaths() {
     HashMap<String, String> filePaths = new HashMap<>();
     // list all partitions paths

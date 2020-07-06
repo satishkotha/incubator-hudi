@@ -18,11 +18,19 @@
 
 package org.apache.hudi.table;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.avro.Schema;
+import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.Path;
 import org.apache.hudi.avro.model.HoodieArchivedMetaEntry;
 import org.apache.hudi.avro.model.HoodieCompactionPlan;
+import org.apache.hudi.avro.model.HoodieReplaceMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.avro.model.HoodieSavepointMetadata;
+import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.ActionType;
 import org.apache.hudi.common.model.HoodieArchivedLogFile;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
@@ -46,12 +54,6 @@ import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieCommitException;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
-
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.avro.Schema;
-import org.apache.avro.generic.IndexedRecord;
-import org.apache.hadoop.fs.Path;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
@@ -62,8 +64,10 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -161,6 +165,9 @@ public class HoodieTimelineArchiveLog {
     Option<HoodieInstant> oldestPendingCompactionInstant =
         table.getActiveTimeline().filterPendingCompactionTimeline().firstInstant();
 
+    // cannot archive instant that is a replace commit if data files replaced are not cleaned yet.
+    Option<HoodieInstant> oldestReplaceInstant = findOldestReplaceInstantWithData(commitTimeline);
+
     // We cannot have any holes in the commit timeline. We cannot archive any commits which are
     // made after the first savepoint present.
     Option<HoodieInstant> firstSavepoint = table.getCompletedSavepointTimeline().firstInstant();
@@ -173,7 +180,9 @@ public class HoodieTimelineArchiveLog {
       }).filter(s -> {
         // Ensure commits >= oldest pending compaction commit is retained
         return oldestPendingCompactionInstant.map(instant -> HoodieTimeline.compareTimestamps(instant.getTimestamp(), HoodieTimeline.GREATER_THAN, s.getTimestamp())).orElse(true);
-      }).limit(commitTimeline.countInstants() - minCommitsToKeep));
+      }).filter(s ->
+         oldestReplaceInstant.map(instant -> HoodieTimeline.compareTimestamps(instant.getTimestamp(), HoodieTimeline.GREATER_THAN, s.getTimestamp())).orElse(true)
+      ).limit(commitTimeline.countInstants() - minCommitsToKeep));
     }
 
     // For archiving and cleaning instants, we need to include intermediate state files if they exist
@@ -185,6 +194,38 @@ public class HoodieTimelineArchiveLog {
     return instants.flatMap(hoodieInstant ->
         groupByTsAction.get(Pair.of(hoodieInstant.getTimestamp(),
             HoodieInstant.getComparableAction(hoodieInstant.getAction()))).stream());
+  }
+
+  private Option<HoodieInstant> findOldestReplaceInstantWithData(HoodieTimeline timeline) {
+    // filter commits that have replace metadata and then return first instant.
+    return Option.fromJavaOptional(timeline.getCompletedAndReplaceTimeline().getInstants()
+        .filter(instant -> isReplaceCommitWithDataFiles(instant, timeline)).findFirst());
+  }
+
+  private boolean isReplaceCommitWithDataFiles(HoodieInstant instant, HoodieTimeline timeline) {
+    try {
+      HoodieReplaceMetadata replaceMetadata =
+          TimelineMetadataUtils.deserializeHoodieReplaceMetadata(timeline.getInstantDetails(instant).get());
+
+      // get delete file groups for each partition
+      if (replaceMetadata.getPartitionMetadata().size() > 0) {
+        for (Map.Entry<String, List<String>> partitionToFileIdReplaced : replaceMetadata.getPartitionMetadata().entrySet()) {
+          Path partitionPath = FSUtils.getPartitionPath(metaClient.getBasePath(), partitionToFileIdReplaced.getKey());
+          Set<String> replacedFiles = new HashSet<>(partitionToFileIdReplaced.getValue());
+
+          for (FileStatus fileStatus : metaClient.getFs().listStatus(partitionPath)) {
+            String fileId = FSUtils.getFileIdFromFilePath(fileStatus.getPath());
+            if (replacedFiles.contains(fileId)) {
+              LOG.info("Replaced file " + fileId + " still not cleaned. Cannot archive commits on or after " + instant.getTimestamp());
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    } catch (IOException e) {
+      throw new HoodieIOException("error reading commit metadata for " + instant);
+    }
   }
 
   private boolean deleteArchivedInstants(List<HoodieInstant> archivedInstants) throws IOException {

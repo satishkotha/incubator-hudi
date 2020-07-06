@@ -224,6 +224,8 @@ public class DataSourceUtils {
       return client.bulkInsert(hoodieRecords, instantTime, userDefinedBulkInsertPartitioner);
     } else if (operation.equals(DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL())) {
       return client.insert(hoodieRecords, instantTime);
+    } else if (operation.equals(DataSourceWriteOptions.INSERT_OVERWRITE_OPERATION_OPT_VAL())) {
+      return client.insertOverwrite(hoodieRecords, instantTime);
     } else {
       // default is upsert
       return client.upsert(hoodieRecords, instantTime);

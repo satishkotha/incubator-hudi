@@ -19,6 +19,7 @@
 package org.apache.hudi.table.action.clean;
 
 import org.apache.hudi.avro.model.HoodieCleanMetadata;
+import org.apache.hudi.avro.model.HoodieReplaceMetadata;
 import org.apache.hudi.avro.model.HoodieSavepointMetadata;
 import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.CompactionOperation;
@@ -262,52 +263,90 @@ public class CleanPlanner<T extends HoodieRecordPayload<T>> implements Serializa
     // determine if we have enough commits, to start cleaning.
     if (commitTimeline.countInstants() > commitsRetained) {
       HoodieInstant earliestCommitToRetain = getEarliestCommitToRetain().get();
-      List<HoodieFileGroup> fileGroups = fileSystemView.getAllFileGroups(partitionPath).collect(Collectors.toList());
-      for (HoodieFileGroup fileGroup : fileGroups) {
-        List<FileSlice> fileSliceList = fileGroup.getAllFileSlices().collect(Collectors.toList());
 
-        if (fileSliceList.isEmpty()) {
+      // check all active file groups
+      List<HoodieFileGroup> fileGroups = fileSystemView.getAllFileGroups(partitionPath).collect(Collectors.toList());
+      collectFileGroupsEarlierThanCommit(fileGroups, earliestCommitToRetain, savepointedFiles, false, deletePaths);
+
+      // check if any replaced file groups are eligible to clean
+      List<HoodieFileGroup> replacedFileGroups = fileSystemView.getAllExcludeFileGroups(partitionPath).map(fileGroup ->
+          new HoodieFileGroup(partitionPath, fileGroup, hoodieTable.getActiveTimeline())).collect(Collectors.toList());
+      collectFileGroupsEarlierThanCommit(replacedFileGroups, earliestCommitToRetain, savepointedFiles, true, deletePaths);
+    }
+
+    return deletePaths;
+  }
+
+  private void collectFileGroupsEarlierThanCommit(List<HoodieFileGroup> fileGroups,
+                                                  HoodieInstant earliestCommitToRetain,
+                                                  List<String> savepointedFiles,
+                                                  boolean replacedFileGroups,
+                                                  List<String> deletePaths) {
+    for (HoodieFileGroup fileGroup : fileGroups) {
+      List<FileSlice> fileSliceList = fileGroup.getAllFileSlices().collect(Collectors.toList());
+
+      if (fileSliceList.isEmpty()) {
+        continue;
+      }
+
+      String lastVersion = fileSliceList.get(0).getBaseInstantTime();
+      String lastVersionBeforeEarliestCommitToRetain =
+          getLatestVersionBeforeCommit(fileSliceList, earliestCommitToRetain);
+
+      // Ensure there are more than 1 version of the file (we only clean old files from updates)
+      // i.e always spare the last commit.
+      for (FileSlice aSlice : fileSliceList) {
+        Option<HoodieBaseFile> aFile = aSlice.getBaseFile();
+        String fileCommitTime = aSlice.getBaseInstantTime();
+        if (aFile.isPresent() && savepointedFiles.contains(aFile.get().getFileName())) {
+          // do not clean up a savepoint data file
+          continue;
+        }
+        // Dont delete the latest commit and also the last commit before the earliest commit we
+        // are retaining
+        // The window of commit retain == max query run time. So a query could be running which
+        // still
+        // uses this file.
+        if (!replacedFileGroups && (fileCommitTime.equals(lastVersion) || (fileCommitTime.equals(lastVersionBeforeEarliestCommitToRetain)))) {
+          // move on to the next file
           continue;
         }
 
-        String lastVersion = fileSliceList.get(0).getBaseInstantTime();
-        String lastVersionBeforeEarliestCommitToRetain =
-            getLatestVersionBeforeCommit(fileSliceList, earliestCommitToRetain);
-
-        // Ensure there are more than 1 version of the file (we only clean old files from updates)
-        // i.e always spare the last commit.
-        for (FileSlice aSlice : fileSliceList) {
-          Option<HoodieBaseFile> aFile = aSlice.getBaseFile();
-          String fileCommitTime = aSlice.getBaseInstantTime();
-          if (aFile.isPresent() && savepointedFiles.contains(aFile.get().getFileName())) {
-            // do not clean up a savepoint data file
-            continue;
-          }
-          // Dont delete the latest commit and also the last commit before the earliest commit we
-          // are retaining
-          // The window of commit retain == max query run time. So a query could be running which
-          // still
-          // uses this file.
-          if (fileCommitTime.equals(lastVersion) || (fileCommitTime.equals(lastVersionBeforeEarliestCommitToRetain))) {
-            // move on to the next file
-            continue;
-          }
-
-          // Always keep the last commit
-          if (!isFileSliceNeededForPendingCompaction(aSlice) && HoodieTimeline
-              .compareTimestamps(earliestCommitToRetain.getTimestamp(), HoodieTimeline.GREATER_THAN, fileCommitTime)) {
-            // this is a commit, that should be cleaned.
-            aFile.ifPresent(hoodieDataFile -> deletePaths.add(hoodieDataFile.getFileName()));
-            if (hoodieTable.getMetaClient().getTableType() == HoodieTableType.MERGE_ON_READ) {
-              // If merge on read, then clean the log files for the commits as well
-              deletePaths.addAll(aSlice.getLogFiles().map(HoodieLogFile::getFileName).collect(Collectors.toList()));
-            }
+        if (replacedFileGroups || (!isFileSliceNeededForPendingCompaction(aSlice) && HoodieTimeline
+            .compareTimestamps(earliestCommitToRetain.getTimestamp(), HoodieTimeline.GREATER_THAN, fileCommitTime))) {
+          // this is a commit, that should be cleaned. Note that, if this is replaced file group,
+          // there could be a pending (or inflight) compaction on this file group.
+          // Compaction may not find this file if cleaner removes it. We need to handle these failures gracefully in compaction code
+          aFile.ifPresent(hoodieDataFile -> deletePaths.add(hoodieDataFile.getFileName()));
+          if (hoodieTable.getMetaClient().getTableType() == HoodieTableType.MERGE_ON_READ) {
+            // If merge on read, then clean the log files for the commits as well
+            deletePaths.addAll(aSlice.getLogFiles().map(HoodieLogFile::getFileName).collect(Collectors.toList()));
           }
         }
       }
     }
+  }
 
-    return deletePaths;
+  private boolean isFileGroupReplaced(String commitTime, String partitionPath, String fileId) {
+    // TODO we want to have a cache here for (commitTime -> replaceMetadata) to make this faster
+    Option<HoodieInstant> replaceInstantOption = hoodieTable.getMetaClient().getActiveTimeline().getCompletedAndReplaceTimeline()
+        .filter(instant -> instant.getTimestamp().equals(commitTime))
+        .firstInstant();
+
+    if (!replaceInstantOption.isPresent()) {
+      return false;
+    }
+
+    HoodieInstant replaceInstant = replaceInstantOption.get();
+    try {
+      HoodieReplaceMetadata replaceMetadata = TimelineMetadataUtils.deserializeHoodieReplaceMetadata(
+          hoodieTable.getMetaClient().getActiveTimeline().getInstantDetails(replaceInstant).get());
+
+      // get delete file groups for each partition
+      return replaceMetadata.getPartitionMetadata().getOrDefault(partitionPath, Collections.emptyList()).contains(fileId);
+    } catch (IOException e) {
+      throw new HoodieIOException("error reading replace metadata for " + replaceInstant);
+    }
   }
 
   /**
