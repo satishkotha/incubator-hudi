@@ -326,30 +326,42 @@ public class HoodieTestDataGenerator {
   }
 
   public static void createCommitFile(String basePath, String instantTime, Configuration configuration) {
+    HoodieCommitMetadata commitMetadata = new HoodieCommitMetadata();
+    createCommitFile(basePath, instantTime, configuration, commitMetadata);
+  }
+
+  public static void createCommitFile(String basePath, String instantTime, Configuration configuration, HoodieCommitMetadata commitMetadata) {
     Arrays.asList(HoodieTimeline.makeCommitFileName(instantTime), HoodieTimeline.makeInflightCommitFileName(instantTime),
         HoodieTimeline.makeRequestedCommitFileName(instantTime))
-        .forEach(f -> {
-          Path commitFile = new Path(
-              basePath + "/" + HoodieTableMetaClient.METAFOLDER_NAME + "/" + f);
-          FSDataOutputStream os = null;
-          try {
-            FileSystem fs = FSUtils.getFs(basePath, configuration);
-            os = fs.create(commitFile, true);
-            HoodieCommitMetadata commitMetadata = new HoodieCommitMetadata();
-            // Write empty commit metadata
-            os.writeBytes(new String(commitMetadata.toJsonString().getBytes(StandardCharsets.UTF_8)));
-          } catch (IOException ioe) {
-            throw new HoodieIOException(ioe.getMessage(), ioe);
-          } finally {
-            if (null != os) {
-              try {
-                os.close();
-              } catch (IOException e) {
-                throw new HoodieIOException(e.getMessage(), e);
-              }
-            }
-          }
-        });
+        .forEach(f -> createMetadataFile(f, basePath, configuration, commitMetadata));
+  }
+
+  private static void createMetadataFile(String f, String basePath, Configuration configuration, HoodieCommitMetadata commitMetadata) {
+    Path commitFile = new Path(
+        basePath + "/" + HoodieTableMetaClient.METAFOLDER_NAME + "/" + f);
+    FSDataOutputStream os = null;
+    try {
+      FileSystem fs = FSUtils.getFs(basePath, configuration);
+      os = fs.create(commitFile, true);
+      // Write empty commit metadata
+      os.writeBytes(new String(commitMetadata.toJsonString().getBytes(StandardCharsets.UTF_8)));
+    } catch (IOException ioe) {
+      throw new HoodieIOException(ioe.getMessage(), ioe);
+    } finally {
+      if (null != os) {
+        try {
+          os.close();
+        } catch (IOException e) {
+          throw new HoodieIOException(e.getMessage(), e);
+        }
+      }
+    }
+  }
+
+  public static void createReplaceFile(String basePath, String instantTime, Configuration configuration, HoodieCommitMetadata commitMetadata) {
+    Arrays.asList(HoodieTimeline.makeReplaceFileName(instantTime), HoodieTimeline.makeInflightReplaceFileName(instantTime),
+        HoodieTimeline.makeRequestedReplaceFileName(instantTime))
+        .forEach(f -> createMetadataFile(f, basePath, configuration, commitMetadata));
   }
 
   public static void createEmptyCleanRequestedFile(String basePath, String instantTime, Configuration configuration)
@@ -364,6 +376,14 @@ public class HoodieTestDataGenerator {
     Path commitFile = new Path(basePath + "/" + HoodieTableMetaClient.METAFOLDER_NAME + "/"
         + HoodieTimeline.makeRequestedCompactionFileName(instantTime));
     createEmptyFile(basePath, commitFile, configuration);
+  }
+
+  public static void createDataFile(String basePath, String partitionPath, String instantTime, String fileID, Configuration configuration)
+      throws IOException {
+
+    Path dataFilePath = new Path(basePath + "/" + partitionPath + "/"
+        + FSUtils.makeDataFileName(instantTime, "1_0_1", fileID));
+    createEmptyFile(basePath, dataFilePath, configuration);
   }
 
   private static void createEmptyFile(String basePath, Path filePath, Configuration configuration) throws IOException {

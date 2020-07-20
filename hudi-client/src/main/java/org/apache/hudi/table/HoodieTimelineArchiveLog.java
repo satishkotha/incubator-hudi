@@ -18,17 +18,18 @@
 
 package org.apache.hudi.table;
 
-import org.apache.hadoop.conf.Configuration;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.IndexedRecord;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
-
 import org.apache.hudi.avro.model.HoodieArchivedMetaEntry;
 import org.apache.hudi.avro.model.HoodieCompactionPlan;
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.avro.model.HoodieSavepointMetadata;
+import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.ActionType;
 import org.apache.hudi.common.model.HoodieArchivedLogFile;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
@@ -65,6 +66,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -275,6 +277,7 @@ public class HoodieTimelineArchiveLog {
       LOG.info("Wrapper schema " + wrapperSchema.toString());
       List<IndexedRecord> records = new ArrayList<>();
       for (HoodieInstant hoodieInstant : instants) {
+        deleteReplacedFiles(hoodieInstant);
         try {
           deleteAnyLeftOverMarkerFiles(jsc, hoodieInstant);
           records.add(convertToAvroRecord(commitTimeline, hoodieInstant));
@@ -298,6 +301,44 @@ public class HoodieTimelineArchiveLog {
     MarkerFiles markerFiles = new MarkerFiles(table, instant.getTimestamp());
     if (markerFiles.deleteMarkerDir(jsc, config.getMarkersDeleteParallelism())) {
       LOG.info("Cleaned up left over marker directory for instant :" + instant);
+    }
+  }
+
+  private void deleteReplacedFiles(HoodieInstant instant) {
+    if (!instant.isCompleted()) {
+      // only delete files for completed instants
+      return;
+    }
+    Option<HoodieInstant> replaceInstantOption = metaClient.getActiveTimeline().getCompletedAndReplaceTimeline()
+        .filter(replaceInstant -> replaceInstant.getTimestamp().equals(instant.getTimestamp())).firstInstant();
+
+    replaceInstantOption.ifPresent(replaceInstant -> {
+      try {
+        HoodieCommitMetadata metadata = HoodieCommitMetadata.fromBytes(
+            metaClient.getActiveTimeline().getInstantDetails(replaceInstant).get(),
+            HoodieCommitMetadata.class);
+
+        metadata.getPartitionToReplaceStats().entrySet().stream().forEach(entry ->
+            deleteFileGroups(entry.getKey(), entry.getValue().stream().map(e -> e.getFileId()).collect(Collectors.toSet()), instant)
+        );
+      } catch (IOException e) {
+        throw new HoodieCommitException("Failed to archive because cannot delete replace files", e);
+      }
+    });
+  }
+
+  private void deleteFileGroups(String partitionPath, Set<String> fileIdsToDelete, HoodieInstant instant) {
+    try {
+      FileStatus[] statuses = metaClient.getFs().listStatus(FSUtils.getPartitionPath(metaClient.getBasePath(), partitionPath));
+      for (FileStatus status : statuses) {
+        String fileId = FSUtils.getFileIdFromFilePath(status.getPath());
+        if (fileIdsToDelete.contains(fileId)) {
+          LOG.info("Delete " + status.getPath() + " to archive " + instant);
+          metaClient.getFs().delete(status.getPath());
+        }
+      }
+    } catch (IOException e) {
+      LOG.error("unable to delete file groups that are replaced", e);
     }
   }
 
@@ -327,7 +368,8 @@ public class HoodieTimelineArchiveLog {
         break;
       }
       case HoodieTimeline.COMMIT_ACTION:
-      case HoodieTimeline.DELTA_COMMIT_ACTION: {
+      case HoodieTimeline.DELTA_COMMIT_ACTION:
+      case HoodieTimeline.REPLACE_ACTION: {
         HoodieCommitMetadata commitMetadata = HoodieCommitMetadata
             .fromBytes(commitTimeline.getInstantDetails(hoodieInstant).get(), HoodieCommitMetadata.class);
         archivedMetaWrapper.setHoodieCommitMetadata(convertCommitMetadata(commitMetadata));

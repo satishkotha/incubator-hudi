@@ -115,6 +115,15 @@ public class UpsertPartitioner<T extends HoodieRecordPayload<T>> extends Partiti
     }
   }
 
+  protected int addBucket(String partitionPath, String fileId, BucketType bucketType) {
+    BucketInfo bucketInfo = new BucketInfo();
+    bucketInfo.bucketType = bucketType;
+    bucketInfo.partitionPath = partitionPath;
+    bucketInfo.fileIdPrefix = fileId;
+    bucketInfoMap.put(totalBuckets, bucketInfo);
+    return totalBuckets++;
+  }
+
   private int addUpdateBucket(String partitionPath, String fileIdHint) {
     int bucket = totalBuckets;
     updateLocationToBucket.put(fileIdHint, bucket);

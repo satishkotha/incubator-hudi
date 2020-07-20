@@ -35,8 +35,10 @@ import org.apache.log4j.Logger;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -53,6 +55,7 @@ public class HoodieTableFileSystemView extends IncrementalTimelineSyncFileSystem
 
   // mapping from partition paths to file groups contained within them
   protected Map<String, List<HoodieFileGroup>> partitionToFileGroupsMap;
+  protected Map<String, Set<String>> partitionToExcludeFileGroupsMap;
 
   /**
    * PartitionPath + File-Id to pending compaction instant time.
@@ -92,6 +95,7 @@ public class HoodieTableFileSystemView extends IncrementalTimelineSyncFileSystem
   @Override
   public void init(HoodieTableMetaClient metaClient, HoodieTimeline visibleActiveTimeline) {
     this.partitionToFileGroupsMap = createPartitionToFileGroups();
+    this.partitionToExcludeFileGroupsMap = createPartitionToExcludeFileGroups();
     super.init(metaClient, visibleActiveTimeline);
   }
 
@@ -106,9 +110,14 @@ public class HoodieTableFileSystemView extends IncrementalTimelineSyncFileSystem
     this.fgIdToPendingCompaction = null;
     this.partitionToFileGroupsMap = null;
     this.fgIdToBootstrapBaseFile = null;
+    this.partitionToExcludeFileGroupsMap = null;
   }
 
   protected Map<String, List<HoodieFileGroup>> createPartitionToFileGroups() {
+    return new ConcurrentHashMap<>();
+  }
+
+  protected Map<String, Set<String>> createPartitionToExcludeFileGroups() {
     return new ConcurrentHashMap<>();
   }
 
@@ -257,8 +266,24 @@ public class HoodieTableFileSystemView extends IncrementalTimelineSyncFileSystem
   }
 
   @Override
+  protected void storePartitionExcludedFiles(final String partition, final Set<String> fileIdsToExclude) {
+    LOG.info("Ignore file-ids for partition :" + partition + ", #FileGroups=" + fileIdsToExclude.size());
+    partitionToExcludeFileGroupsMap.put(partition, fileIdsToExclude);
+  }
+
+  @Override
   public Stream<HoodieFileGroup> fetchAllStoredFileGroups() {
     return partitionToFileGroupsMap.values().stream().flatMap(Collection::stream);
+  }
+
+  @Override
+  public boolean isExcludeFileGroup(String partitionPath, String fileId) {
+    return partitionToExcludeFileGroupsMap.getOrDefault(partitionPath, Collections.emptySet()).contains(fileId);
+  }
+
+  @Override
+  public Stream<String> getAllExcludeFileGroups(String partitionPath) {
+    return partitionToExcludeFileGroupsMap.getOrDefault(partitionPath, Collections.emptySet()).stream();
   }
 
   @Override

@@ -321,6 +321,22 @@ public class HoodieWriteClient<T extends HoodieRecordPayload> extends AbstractHo
   }
 
   /**
+   * Removes all existing records from the partitions affected and inserts the given HoodieRecords, into the table.
+
+   * @param records HoodieRecords to insert
+   * @param instantTime Instant time of the commit
+   * @return JavaRDD[WriteStatus] - RDD of WriteStatus to inspect errors and counts
+   */
+  public JavaRDD<WriteStatus> insertOverwrite(JavaRDD<HoodieRecord<T>> records, final String instantTime) {
+    HoodieTable<T> table = getTableAndInitCtx(WriteOperationType.INSERT_OVERWRITE, instantTime);
+    table.validateInsertSchema();
+    setOperationType(WriteOperationType.INSERT_OVERWRITE);
+    this.asyncCleanerService = AsyncCleanerService.startAsyncCleaningIfEnabled(this, instantTime);
+    HoodieWriteMetadata result = table.insertOverwrite(jsc, instantTime, records);
+    return postWrite(result, instantTime, table);
+  }
+
+  /**
    * Deletes a list of {@link HoodieKey}s from the Hoodie table, at the supplied instantTime {@link HoodieKey}s will be
    * de-duped and non existent keys will be removed before deleting.
    *
@@ -576,7 +592,8 @@ public class HoodieWriteClient<T extends HoodieRecordPayload> extends AbstractHo
       rollbackPendingCommits();
     }
     String instantTime = HoodieActiveTimeline.createNewInstantTime();
-    startCommit(instantTime);
+    HoodieTableMetaClient metaClient = createMetaClient(true);
+    startCommit(instantTime, metaClient.getCommitActionType());
     return instantTime;
   }
 
@@ -586,15 +603,23 @@ public class HoodieWriteClient<T extends HoodieRecordPayload> extends AbstractHo
    * @param instantTime Instant time to be generated
    */
   public void startCommitWithTime(String instantTime) {
+    HoodieTableMetaClient metaClient = createMetaClient(true);
+    startCommitWithTime(instantTime, metaClient.getCommitActionType());
+  }
+
+  /**
+   * Completes a new commit time for a write operation (insert/update/delete) with specified action.
+   */
+  public void startCommitWithTime(String instantTime, String actionType) {
     // NOTE : Need to ensure that rollback is done before a new commit is started
     if (rollbackPending) {
       // Only rollback inflight commit/delta-commits. Do not touch compaction commits
       rollbackPendingCommits();
     }
-    startCommit(instantTime);
+    startCommit(instantTime, actionType);
   }
 
-  private void startCommit(String instantTime) {
+  private void startCommit(String instantTime, String actionType) {
     LOG.info("Generate a new instant time " + instantTime);
     HoodieTableMetaClient metaClient = createMetaClient(true);
     // if there are pending compactions, their instantTime must not be greater than that of this instant time
@@ -603,7 +628,7 @@ public class HoodieWriteClient<T extends HoodieRecordPayload> extends AbstractHo
             HoodieTimeline.compareTimestamps(latestPending.getTimestamp(), HoodieTimeline.LESSER_THAN, instantTime),
         "Latest pending compaction instant time must be earlier than this instant time. Latest Compaction :"
             + latestPending + ",  Ingesting at " + instantTime));
-    metaClient.getActiveTimeline().createNewInstant(new HoodieInstant(State.REQUESTED, metaClient.getCommitActionType(),
+    metaClient.getActiveTimeline().createNewInstant(new HoodieInstant(State.REQUESTED, actionType,
         instantTime));
   }
 

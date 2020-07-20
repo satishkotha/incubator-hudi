@@ -18,13 +18,16 @@
 
 package org.apache.hudi.common.table.view;
 
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.Path;
 import org.apache.hudi.common.bootstrap.index.BootstrapIndex;
 import org.apache.hudi.common.fs.FSUtils;
+import org.apache.hudi.common.model.BootstrapBaseFileMapping;
 import org.apache.hudi.common.model.BootstrapFileMapping;
 import org.apache.hudi.common.model.CompactionOperation;
-import org.apache.hudi.common.model.BootstrapBaseFileMapping;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieBaseFile;
+import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieFileGroup;
 import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.model.HoodieLogFile;
@@ -37,13 +40,12 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieIOException;
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.Path;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -110,7 +112,7 @@ public abstract class AbstractTableFileSystemView implements SyncableFileSystemV
    * @param visibleActiveTimeline Visible Active Timeline
    */
   protected void refreshTimeline(HoodieTimeline visibleActiveTimeline) {
-    this.visibleCommitsAndCompactionTimeline = visibleActiveTimeline.getCommitsAndCompactionTimeline();
+    this.visibleCommitsAndCompactionTimeline = visibleActiveTimeline.getWriteActionTimeline();
   }
 
   /**
@@ -118,6 +120,11 @@ public abstract class AbstractTableFileSystemView implements SyncableFileSystemV
    */
   protected List<HoodieFileGroup> addFilesToView(FileStatus[] statuses) {
     HoodieTimer timer = new HoodieTimer().startTimer();
+    final Map<String, Set<String>> partitionFileIdsToExclude = getFileIdsToExclude(visibleCommitsAndCompactionTimeline);
+    partitionFileIdsToExclude.entrySet().stream().forEach(entry -> {
+      storePartitionExcludedFiles(entry.getKey(), entry.getValue());
+    });
+
     List<HoodieFileGroup> fileGroups = buildFileGroups(statuses, visibleCommitsAndCompactionTimeline, true);
     long fgBuildTimeTakenMs = timer.endTimer();
     timer.startTimer();
@@ -173,27 +180,57 @@ public abstract class AbstractTableFileSystemView implements SyncableFileSystemV
     List<HoodieFileGroup> fileGroups = new ArrayList<>();
     fileIdSet.forEach(pair -> {
       String fileId = pair.getValue();
-      HoodieFileGroup group = new HoodieFileGroup(pair.getKey(), fileId, timeline);
-      if (baseFiles.containsKey(pair)) {
-        baseFiles.get(pair).forEach(group::addBaseFile);
-      }
-      if (logFiles.containsKey(pair)) {
-        logFiles.get(pair).forEach(group::addLogFile);
-      }
+      String partitionPath = pair.getKey();
+      if (isExcludeFileGroup(partitionPath, fileId)) {
+        LOG.info("excluding file " + fileId + " from view for partition " + partitionPath);
+      } else {
+        HoodieFileGroup group = new HoodieFileGroup(pair.getKey(), fileId, timeline);
+        if (baseFiles.containsKey(pair)) {
+          baseFiles.get(pair).forEach(group::addBaseFile);
+        }
+        if (logFiles.containsKey(pair)) {
+          logFiles.get(pair).forEach(group::addLogFile);
+        }
 
-      if (addPendingCompactionFileSlice) {
-        Option<Pair<String, CompactionOperation>> pendingCompaction =
-            getPendingCompactionOperationWithInstant(group.getFileGroupId());
-        if (pendingCompaction.isPresent()) {
-          // If there is no delta-commit after compaction request, this step would ensure a new file-slice appears
-          // so that any new ingestion uses the correct base-instant
-          group.addNewFileSliceAtInstant(pendingCompaction.get().getKey());
+        if (addPendingCompactionFileSlice) {
+          Option<Pair<String, CompactionOperation>> pendingCompaction =
+              getPendingCompactionOperationWithInstant(group.getFileGroupId());
+          if (pendingCompaction.isPresent()) {
+            // If there is no delta-commit after compaction request, this step would ensure a new file-slice appears
+            // so that any new ingestion uses the correct base-instant
+            group.addNewFileSliceAtInstant(pendingCompaction.get().getKey());
+          }
+          fileGroups.add(group);
         }
       }
-      fileGroups.add(group);
-    });
+    }
+    );
 
     return fileGroups;
+  }
+
+  /**
+   * Get file groups to exclude by looking at all commit instants.
+   */
+  private Map<String, Set<String>> getFileIdsToExclude(HoodieTimeline timeline) {
+    // for each REPLACE instant, get map of (partitionPath -> deleteFileGroup)
+    Stream<Map.Entry<String, Set<String>>> resultStream = timeline.getCompletedAndReplaceTimeline().getInstants().flatMap(instant -> {
+      try {
+        HoodieCommitMetadata replaceMetadata = HoodieCommitMetadata.fromBytes(timeline.getInstantDetails(instant).get(),
+            HoodieCommitMetadata.class);
+
+        // get delete file groups for each partition
+        return replaceMetadata.getPartitionToReplaceStats().entrySet().stream()
+            .map(entry -> new AbstractMap.SimpleEntry<>(entry.getKey(),
+                entry.getValue().stream().map(e -> e.getFileId()).collect(Collectors.toSet())));
+      } catch (IOException e) {
+        throw new HoodieIOException("error reading commit metadata for " + instant);
+      }
+    });
+
+    // merge all maps
+    return resultStream.collect(Collectors.toMap(entry -> entry.getKey(),  entry -> entry.getValue(),
+        (v1, v2) -> Stream.concat(v1.stream(), v2.stream()).collect(Collectors.toSet())));
   }
 
   /**
@@ -726,6 +763,11 @@ public abstract class AbstractTableFileSystemView implements SyncableFileSystemV
    * @return file-group stream
    */
   abstract Stream<HoodieFileGroup> fetchAllStoredFileGroups();
+
+  abstract boolean isExcludeFileGroup(String partitionPath, String fileId);
+
+  protected abstract void storePartitionExcludedFiles(final String partition, final Set<String> fileIdsToExclude);
+
 
   /**
    * Check if the view is already closed.

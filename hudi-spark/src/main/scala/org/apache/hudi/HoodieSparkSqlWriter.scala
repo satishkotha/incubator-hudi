@@ -113,6 +113,9 @@ private[hudi] object HoodieSparkSqlWriter {
         tableConfig = tableMetaClient.getTableConfig
       }
 
+      val metaClient = new HoodieTableMetaClient(sparkContext.hadoopConfiguration, path.get)
+      val commitActionType = DataSourceUtils.getCommitActionType(operation, metaClient)
+
       // short-circuit if bulk_insert via row is enabled.
       // scalastyle:off
       if (parameters(ENABLE_ROW_WRITER_OPT_KEY).toBoolean) {
@@ -165,7 +168,7 @@ private[hudi] object HoodieSparkSqlWriter {
             log.info("new batch has no new records, skipping...")
             (true, common.util.Option.empty())
           }
-          client.startCommitWithTime(instantTime)
+          client.startCommitWithTime(instantTime, commitActionType)
           val writeStatuses = DataSourceUtils.doWriteOperation(client, hoodieRecords, instantTime, operation)
           (writeStatuses, client)
         } else {
@@ -195,15 +198,15 @@ private[hudi] object HoodieSparkSqlWriter {
           }
 
           // Issue deletes
-          client.startCommitWithTime(instantTime)
+          client.startCommitWithTime(instantTime, commitActionType)
           val writeStatuses = DataSourceUtils.doDeleteOperation(client, hoodieKeysToDelete, instantTime)
           (writeStatuses, client)
         }
 
       // Check for errors and commit the write.
       val (writeSuccessful, compactionInstant) =
-        commitAndPerformPostOperations(writeStatuses, parameters, writeClient, tableConfig, instantTime, basePath,
-          operation, jsc)
+        commitAndPerformPostOperations(writeStatuses, parameters, writeClient, tableConfig, jsc,
+          TableInstantInfo(basePath, instantTime, commitActionType, operation))
       (writeSuccessful, common.util.Option.ofNullable(instantTime), compactionInstant, writeClient, tableConfig)
     }
   }
@@ -378,31 +381,35 @@ private[hudi] object HoodieSparkSqlWriter {
     metaSyncSuccess
   }
 
+  /**
+   * Scala says method cannot have more than 7 arguments. So group all table/action specifi information into a case class.
+   */
+  case class TableInstantInfo(basePath: Path, instantTime: String, commitActionType: String, operation: String)
+
   private def commitAndPerformPostOperations(writeStatuses: JavaRDD[WriteStatus],
                                              parameters: Map[String, String],
                                              client: HoodieWriteClient[HoodieRecordPayload[Nothing]],
                                              tableConfig: HoodieTableConfig,
-                                             instantTime: String,
-                                             basePath: Path,
-                                             operation: String,
-                                             jsc: JavaSparkContext): (Boolean, common.util.Option[java.lang.String]) = {
+                                             jsc: JavaSparkContext,
+                                             tableInstantInfo: TableInstantInfo
+                                             ): (Boolean, common.util.Option[java.lang.String]) = {
     val errorCount = writeStatuses.rdd.filter(ws => ws.hasErrors).count()
     if (errorCount == 0) {
       log.info("No errors. Proceeding to commit the write.")
       val metaMap = parameters.filter(kv =>
         kv._1.startsWith(parameters(COMMIT_METADATA_KEYPREFIX_OPT_KEY)))
       val commitSuccess = if (metaMap.isEmpty) {
-        client.commit(instantTime, writeStatuses)
+        client.commit(tableInstantInfo.instantTime, writeStatuses, tableInstantInfo.commitActionType)
       } else {
-        client.commit(instantTime, writeStatuses,
-          common.util.Option.of(new util.HashMap[String, String](mapAsJavaMap(metaMap))))
+        client.commit(tableInstantInfo.instantTime, writeStatuses,
+          common.util.Option.of(new util.HashMap[String, String](mapAsJavaMap(metaMap))), tableInstantInfo.commitActionType)
       }
 
       if (commitSuccess) {
-        log.info("Commit " + instantTime + " successful!")
+        log.info("Commit " + tableInstantInfo.instantTime + " successful!")
       }
       else {
-        log.info("Commit " + instantTime + " failed!")
+        log.info("Commit " + tableInstantInfo.instantTime + " failed!")
       }
 
       val asyncCompactionEnabled = isAsyncCompactionEnabled(client, tableConfig, parameters, jsc.hadoopConfiguration())
@@ -414,7 +421,7 @@ private[hudi] object HoodieSparkSqlWriter {
         }
 
       log.info(s"Compaction Scheduled is $compactionInstant")
-      val metaSyncSuccess =  metaSync(parameters, basePath, jsc.hadoopConfiguration())
+      val metaSyncSuccess =  metaSync(parameters, tableInstantInfo.basePath, jsc.hadoopConfiguration())
 
       log.info(s"Is Async Compaction Enabled ? $asyncCompactionEnabled")
       if (!asyncCompactionEnabled) {
@@ -422,7 +429,7 @@ private[hudi] object HoodieSparkSqlWriter {
       }
       (commitSuccess && metaSyncSuccess, compactionInstant)
     } else {
-      log.error(s"$operation failed with $errorCount errors :")
+      log.error(s"${tableInstantInfo.operation} failed with $errorCount errors :")
       if (log.isTraceEnabled) {
         log.trace("Printing out the top 100 errors")
         writeStatuses.rdd.filter(ws => ws.hasErrors)

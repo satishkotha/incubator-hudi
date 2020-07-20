@@ -25,6 +25,8 @@ import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordPayload;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.StringUtils;
@@ -247,6 +249,14 @@ public class DataSourceUtils {
     return new HoodieWriteClient<>(jssc, createHoodieConfig(schemaStr, basePath, tblName, parameters), true);
   }
 
+  public static String getCommitActionType(String operation, HoodieTableMetaClient metaClient) {
+    if (operation.equals(DataSourceWriteOptions.INSERT_OVERWRITE_OPERATION_OPT_VAL())) {
+      return HoodieTimeline.REPLACE_ACTION;
+    } else {
+      return metaClient.getCommitActionType();
+    }
+  }
+
   public static JavaRDD<WriteStatus> doWriteOperation(HoodieWriteClient client, JavaRDD<HoodieRecord> hoodieRecords,
       String instantTime, String operation) throws HoodieException {
     if (operation.equals(DataSourceWriteOptions.BULK_INSERT_OPERATION_OPT_VAL())) {
@@ -255,6 +265,8 @@ public class DataSourceUtils {
       return client.bulkInsert(hoodieRecords, instantTime, userDefinedBulkInsertPartitioner);
     } else if (operation.equals(DataSourceWriteOptions.INSERT_OPERATION_OPT_VAL())) {
       return client.insert(hoodieRecords, instantTime);
+    } else if (operation.equals(DataSourceWriteOptions.INSERT_OVERWRITE_OPERATION_OPT_VAL())) {
+      return client.insertOverwrite(hoodieRecords, instantTime);
     } else {
       // default is upsert
       return client.upsert(hoodieRecords, instantTime);

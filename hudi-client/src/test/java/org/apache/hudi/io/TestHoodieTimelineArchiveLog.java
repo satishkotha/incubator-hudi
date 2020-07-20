@@ -18,7 +18,12 @@
 
 package org.apache.hudi.io;
 
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.Path;
+import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
+import org.apache.hudi.common.model.HoodieReplaceStat;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
@@ -32,9 +37,6 @@ import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.table.HoodieTimelineArchiveLog;
 import org.apache.hudi.testutils.HoodieClientTestHarness;
-
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.Path;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -205,6 +207,40 @@ public class TestHoodieTimelineArchiveLog extends HoodieClientTestHarness {
 
     // verify in-flight instants after archive
     verifyInflightInstants(metaClient, 2);
+  }
+
+  @Test
+  public void testArchiveTableWithReplacedFiles() throws IOException {
+    HoodieTestUtils.init(hadoopConf, basePath);
+    HoodieWriteConfig cfg = HoodieWriteConfig.newBuilder().withPath(basePath)
+        .withSchema(HoodieTestDataGenerator.TRIP_EXAMPLE_SCHEMA).withParallelism(2, 2).forTable("test-trip-table")
+        .withCompactionConfig(HoodieCompactionConfig.newBuilder().retainCommits(1).archiveCommitsWith(2, 3).build())
+        .build();
+
+    int numCommits = 4;
+    int commitInstant = 100;
+    for (int i = 0; i < numCommits; i++) {
+      createReplaceMetadata(commitInstant);
+      commitInstant += 100;
+    }
+
+    metaClient = HoodieTableMetaClient.reload(metaClient);
+    HoodieTimeline timeline = metaClient.getActiveTimeline().getCommitsTimeline().filterCompletedInstants();
+    assertEquals(4, timeline.countInstants(), "Loaded 4 commits and the count should match");
+    HoodieTimelineArchiveLog archiveLog = new HoodieTimelineArchiveLog(cfg, hadoopConf);
+    boolean result = archiveLog.archiveIfRequired(jsc);
+    assertTrue(result);
+
+    FileStatus[] allFiles = metaClient.getFs().listStatus(new Path(basePath + "/" + HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH));
+    Set<String> allFileIds = Arrays.stream(allFiles).map(fs -> FSUtils.getFileIdFromFilePath(fs.getPath())).collect(Collectors.toSet());
+
+    // verify 100-1,200-1 are deleted by archival
+    assertFalse(allFileIds.contains("file-100-1"));
+    assertFalse(allFileIds.contains("file-200-1"));
+    assertTrue(allFileIds.contains("file-100-2"));
+    assertTrue(allFileIds.contains("file-200-2"));
+    assertTrue(allFileIds.contains("file-300-1"));
+    assertTrue(allFileIds.contains("file-400-1"));
   }
 
   @Test
@@ -426,5 +462,23 @@ public class TestHoodieTimelineArchiveLog extends HoodieClientTestHarness {
 
     org.apache.hudi.avro.model.HoodieCommitMetadata expectedCommitMetadata = archiveLog.convertCommitMetadata(hoodieCommitMetadata);
     assertEquals(expectedCommitMetadata.getOperationType(), WriteOperationType.INSERT.toString());
+  }
+
+  private void createReplaceMetadata(int commitInstant) throws IOException {
+    String commitTime = "" + commitInstant;
+    String fileId1 = "file-" + commitInstant + "-1";
+    String fileId2 = "file-" + commitInstant + "-2";
+
+    // create replace instant to mark fileId1 as deleted
+    HoodieReplaceStat replaceStat1 = new HoodieReplaceStat();
+    replaceStat1.setFileId(fileId1);
+    replaceStat1.setPath("");
+    replaceStat1.setPartitionPath(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH);
+    HoodieCommitMetadata commitMetadata = new HoodieCommitMetadata();
+    commitMetadata.addReplaceStat(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, replaceStat1);
+    commitMetadata.setOperationType(WriteOperationType.INSERT_OVERWRITE);
+    HoodieTestDataGenerator.createReplaceFile(basePath, commitTime, dfs.getConf(), commitMetadata);
+    HoodieTestDataGenerator.createDataFile(basePath, HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, commitTime, fileId1, dfs.getConf());
+    HoodieTestDataGenerator.createDataFile(basePath, HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, commitTime, fileId2, dfs.getConf());
   }
 }

@@ -102,7 +102,7 @@ public class HoodieDataSourceInternalWriter implements DataSourceWriter {
             .flatMap(m -> m.getWriteStatuses().stream().map(m2 -> m2.getStat())).collect(Collectors.toList());
 
     try {
-      writeClient.commitStats(instantTime, writeStatList, Option.empty());
+      writeClient.commitStats(instantTime, writeStatList, Option.empty(), HoodieTimeline.COMMIT_ACTION); //TODO get action type from HoodieWriterCommitMessage
     } catch (Exception ioe) {
       throw new HoodieException(ioe.getMessage(), ioe);
     } finally {

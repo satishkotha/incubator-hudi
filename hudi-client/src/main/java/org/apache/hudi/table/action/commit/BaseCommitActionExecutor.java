@@ -22,6 +22,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -31,12 +33,14 @@ import org.apache.hudi.client.utils.SparkConfigUtils;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordPayload;
+import org.apache.hudi.common.model.HoodieReplaceStat;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieInstant.State;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieCommitException;
 import org.apache.hudi.exception.HoodieIOException;
@@ -104,6 +108,10 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>,
     return result;
   }
 
+  protected String getCommitActionType() {
+    return table.getMetaClient().getCommitActionType();
+  }
+
   /**
    * Save the workload profile in an intermediate file (here re-using commit files) This is useful when performing
    * rollback for MOR tables. Only updates are recorded in the workload profile metadata since updates to log blocks
@@ -134,7 +142,7 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>,
       metadata.setOperationType(operationType);
 
       HoodieActiveTimeline activeTimeline = table.getActiveTimeline();
-      String commitActionType = table.getMetaClient().getCommitActionType();
+      String commitActionType = getCommitActionType();
       HoodieInstant requested = new HoodieInstant(State.REQUESTED, commitActionType, instantTime);
       activeTimeline.transitionRequestedToInflight(requested,
           Option.of(metadata.toJsonString().getBytes(StandardCharsets.UTF_8)),
@@ -144,7 +152,7 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>,
     }
   }
 
-  private Partitioner getPartitioner(WorkloadProfile profile) {
+  protected Partitioner getPartitioner(WorkloadProfile profile) {
     if (WriteOperationType.isChangingRecords(operationType)) {
       return getUpsertPartitioner(profile);
     } else {
@@ -185,37 +193,36 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>,
   }
 
   protected void commit(Option<Map<String, String>> extraMetadata, HoodieWriteMetadata result, List<HoodieWriteStat> stats) {
-    String actionType = table.getMetaClient().getCommitActionType();
+    String actionType = getCommitActionType();
     LOG.info("Committing " + instantTime + ", action Type " + actionType);
     // Create a Hoodie table which encapsulated the commits and files visible
     HoodieTable<T> table = HoodieTable.create(config, hadoopConf);
 
-    HoodieActiveTimeline activeTimeline = table.getActiveTimeline();
-    HoodieCommitMetadata metadata = new HoodieCommitMetadata();
 
     result.setCommitted(true);
-    stats.forEach(stat -> metadata.addWriteStat(stat.getPartitionPath(), stat));
     result.setWriteStats(stats);
 
     // Finalize write
     finalizeWrite(instantTime, stats, result);
 
-    // add in extra metadata
-    if (extraMetadata.isPresent()) {
-      extraMetadata.get().forEach(metadata::addMetadata);
-    }
-    metadata.addMetadata(HoodieCommitMetadata.SCHEMA_KEY, getSchemaToStoreInCommit());
-    metadata.setOperationType(operationType);
-
     try {
-      activeTimeline.saveAsComplete(new HoodieInstant(true, actionType, instantTime),
-          Option.of(metadata.toJsonString().getBytes(StandardCharsets.UTF_8)));
-      LOG.info("Committed " + instantTime);
+      HoodieCommitMetadata metadata = writeInstant(stats, extraMetadata);
+      result.setCommitMetadata(Option.of(metadata));
     } catch (IOException e) {
       throw new HoodieCommitException("Failed to complete commit " + config.getBasePath() + " at time " + instantTime,
           e);
     }
-    result.setCommitMetadata(Option.of(metadata));
+  }
+
+  private HoodieCommitMetadata writeInstant(List<HoodieWriteStat>  stats, Option<Map<String, String>> extraMetadata) throws IOException {
+    LOG.info("Committing " + instantTime + ", action Type " + getCommitActionType());
+    HoodieActiveTimeline activeTimeline = table.getActiveTimeline();
+    HoodieCommitMetadata metadata = CommitUtils.buildCommitMetadata(stats, extraMetadata, operationType, getSchemaToStoreInCommit());
+
+    activeTimeline.saveAsComplete(new HoodieInstant(true, getCommitActionType(), instantTime),
+        Option.of(metadata.toJsonString().getBytes(StandardCharsets.UTF_8)));
+    LOG.info("Committed " + instantTime);
+    return metadata;
   }
 
   /**
@@ -255,6 +262,8 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>,
         return handleInsert(binfo.fileIdPrefix, recordItr);
       } else if (btype.equals(BucketType.UPDATE)) {
         return handleUpdate(binfo.partitionPath, binfo.fileIdPrefix, recordItr);
+      } else if (btype.equals(BucketType.REPLACE)) {
+        return handleReplace(binfo.partitionPath, binfo.fileIdPrefix);
       } else {
         throw new HoodieUpsertException("Unknown bucketType " + btype + " for partition :" + partition);
       }
@@ -285,4 +294,22 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload<T>,
 
   protected abstract Iterator<List<WriteStatus>> handleUpdate(String partitionPath, String fileId,
       Iterator<HoodieRecord<T>> recordItr) throws IOException;
+
+  protected Iterator<List<WriteStatus>> handleReplace(String partitionPath, String fileId) {
+    // mark file as 'deleted' in metadata. the actual file will be removed later by cleaner to provide snapshot isolation
+    WriteStatus status = new WriteStatus(false, 0.0);
+    status.setFileId(fileId);
+    status.setTotalErrorRecords(0);
+    status.setPartitionPath(partitionPath);
+    HoodieReplaceStat replaceStat = new HoodieReplaceStat();
+    status.setStat(replaceStat);
+    replaceStat.setPartitionPath(partitionPath);
+    replaceStat.setFileId(fileId);
+    replaceStat.setPath(partitionPath); //TODO convert this to filepath
+    replaceStat.setNewFileIds(Collections.emptyList()); //TODO get new fileIds created for tracking?
+    status.getStat().setNumDeletes(Integer.MAX_VALUE);//token to indicate all rows are deleted
+    List<WriteStatus> result = new ArrayList<>();
+    result.add(status);
+    return Collections.singletonList(result).iterator();
+  }
 }

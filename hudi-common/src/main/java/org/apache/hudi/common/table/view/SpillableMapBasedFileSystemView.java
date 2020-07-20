@@ -36,6 +36,8 @@ import org.apache.hudi.common.util.collection.Pair;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
+import java.util.Set;
+
 /**
  * Table FileSystemView implementation where view is stored in spillable disk using fixed memory.
  */
@@ -75,6 +77,13 @@ public class SpillableMapBasedFileSystemView extends HoodieTableFileSystemView {
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
+  }
+
+  @Override
+  protected Map<String, Set<String>> createPartitionToExcludeFileGroups() {
+    // TODO should we create another spillable directory under baseStoreDir?
+    // the exclude file group is expected to be small, so use parent class in-memory representation
+    return super.createPartitionToExcludeFileGroups();
   }
 
   @Override

@@ -46,6 +46,8 @@ public class HoodieCommitMetadata implements Serializable {
   public static final String SCHEMA_KEY = "schema";
   private static final Logger LOG = LogManager.getLogger(HoodieCommitMetadata.class);
   protected Map<String, List<HoodieWriteStat>> partitionToWriteStats;
+  protected Map<String, List<HoodieReplaceStat>> partitionToReplaceStats;
+
   protected Boolean compacted;
 
   private Map<String, String> extraMetadata;
@@ -60,6 +62,7 @@ public class HoodieCommitMetadata implements Serializable {
   public HoodieCommitMetadata(boolean compacted) {
     extraMetadata = new HashMap<>();
     partitionToWriteStats = new HashMap<>();
+    partitionToReplaceStats = new HashMap<>();
     this.compacted = compacted;
   }
 
@@ -70,6 +73,13 @@ public class HoodieCommitMetadata implements Serializable {
     partitionToWriteStats.get(partitionPath).add(stat);
   }
 
+  public void addReplaceStat(String partitionPath, HoodieReplaceStat stat) {
+    if (!partitionToReplaceStats.containsKey(partitionPath)) {
+      partitionToReplaceStats.put(partitionPath, new ArrayList<>());
+    }
+    partitionToReplaceStats.get(partitionPath).add(stat);
+  }
+
   public void addMetadata(String metaKey, String value) {
     extraMetadata.put(metaKey, value);
   }
@@ -78,12 +88,20 @@ public class HoodieCommitMetadata implements Serializable {
     return partitionToWriteStats.get(partitionPath);
   }
 
+  public List<HoodieReplaceStat> getReplaceStats(String partitionPath) {
+    return partitionToReplaceStats.get(partitionPath);
+  }
+
   public Map<String, String> getExtraMetadata() {
     return extraMetadata;
   }
 
   public Map<String, List<HoodieWriteStat>> getPartitionToWriteStats() {
     return partitionToWriteStats;
+  }
+
+  public Map<String, List<HoodieReplaceStat>> getPartitionToReplaceStats() {
+    return partitionToReplaceStats;
   }
 
   public String getMetadata(String metaKey) {
@@ -365,7 +383,10 @@ public class HoodieCommitMetadata implements Serializable {
 
   @Override
   public String toString() {
-    return "HoodieCommitMetadata{partitionToWriteStats=" + partitionToWriteStats + ", compacted=" + compacted
-        + ", extraMetadata=" + extraMetadata + '}';
+    return "HoodieCommitMetadata{" + "partitionToWriteStats=" + partitionToWriteStats
+        + ", partitionToReplaceStats=" + partitionToReplaceStats
+        + ", compacted=" + compacted
+        + ", extraMetadata=" + extraMetadata
+        + ", operationType=" + operationType + '}';
   }
 }

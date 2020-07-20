@@ -38,6 +38,8 @@ public enum WriteOperationType {
   // delete
   DELETE("delete"),
   BOOTSTRAP("bootstrap"),
+  // insert overwrite
+  INSERT_OVERWRITE("insert_overwrite"),
   // used for old version
   UNKNOWN("unknown");
 
