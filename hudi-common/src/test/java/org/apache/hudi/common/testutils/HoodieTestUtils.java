@@ -212,7 +212,7 @@ public class HoodieTestUtils {
     HoodieReplaceMetadata replaceMetadata = new HoodieReplaceMetadata();
     replaceMetadata.setVersion(1);
     replaceMetadata.setPartitionMetadata(partitionToReplaceFiles);
-    replaceMetadata.setTotalFilesReplaced(1);
+    replaceMetadata.setTotalFileGroupsReplaced(1);
     replaceMetadata.setCommand("test");
 
     HoodieActiveTimeline commitTimeline = metaClient.getActiveTimeline();

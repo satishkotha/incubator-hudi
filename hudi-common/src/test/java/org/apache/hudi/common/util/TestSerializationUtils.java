@@ -79,7 +79,7 @@ public class TestSerializationUtils {
     }
     String command = "clustering";
     replaceMetadata.setVersion(1);
-    replaceMetadata.setTotalFilesReplaced(numFiles);
+    replaceMetadata.setTotalFileGroupsReplaced(numFiles);
     replaceMetadata.setCommand(command);
     replaceMetadata.setPartitionMetadata(partitionToReplaceFileId);
     String filePath = "/tmp/myreplacetest";
@@ -90,7 +90,7 @@ public class TestSerializationUtils {
 
     data = Files.readAllBytes(Paths.get(filePath));
     HoodieReplaceMetadata replaceMetadataD = TimelineMetadataUtils.deserializeHoodieReplaceMetadata(data);
-    assertEquals(replaceMetadataD.getTotalFilesReplaced(), numFiles);
+    assertEquals(replaceMetadataD.getTotalFileGroupsReplaced(), numFiles);
     assertEquals(command, replaceMetadataD.getCommand());
     assertEquals(partitionToReplaceFileId, replaceMetadataD.getPartitionMetadata());
   }

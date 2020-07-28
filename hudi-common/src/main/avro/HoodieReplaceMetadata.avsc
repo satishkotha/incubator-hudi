@@ -26,7 +26,7 @@
  "type": "record",
  "name": "HoodieReplaceMetadata",
  "fields": [
-     {"name": "totalFilesReplaced", "type": "int"},
+     {"name": "totalFileGroupsReplaced", "type": "int"},
      {"name": "command", "type": "string"},
      {"name": "partitionMetadata", "type": {
      "type" : "map", "values" : {
